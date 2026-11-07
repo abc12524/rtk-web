@@ -46,7 +46,7 @@ cargo run
 ### GET /health
 
 ```json
-{"status":"ok","service":"rtk-web","version":"0.1.0"}
+{"status":"ok","service":"rtk-web","version":"0.1.1"}
 ```
 
 ### GET /api/formats
@@ -133,9 +133,9 @@ curl -X POST http://127.0.0.1:8787/api/compress/json \
   "changed": true,
   "stats": {
     "bytes_before": 8,
-    "bytes_after": 6,
-    "bytes_saved": 2,
-    "saved_percent": 25.0,
+    "bytes_after": 7,
+    "bytes_saved": 1,
+    "saved_percent": 12.5,
     "tokens_before": 2,
     "tokens_after": 2
   }

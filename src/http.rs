@@ -2,8 +2,13 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Multipart, Query, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Multipart, Query, Request, State,
+        multipart::{MultipartError, MultipartRejection},
+        rejection::{BytesRejection, JsonRejection},
+    },
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -49,7 +54,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/compress/json", post(compress_json))
         .route("/api/compress/file", post(compress_file))
         .layer(DefaultBodyLimit::max(max_body))
+        .layer(middleware::from_fn(jsonify_routing_errors))
         .with_state(state)
+}
+
+async fn jsonify_routing_errors(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    let status = response.status();
+    if status != StatusCode::NOT_FOUND && status != StatusCode::METHOD_NOT_ALLOWED {
+        return response;
+    }
+
+    let message = if status == StatusCode::METHOD_NOT_ALLOWED {
+        "method not allowed"
+    } else {
+        "not found"
+    };
+    let mut replacement = (status, Json(json!({ "error": message }))).into_response();
+    if let Some(allow) = response.headers().get(header::ALLOW) {
+        replacement.headers_mut().insert(header::ALLOW, allow.clone());
+    }
+    replacement
 }
 
 async fn docs() -> impl IntoResponse {
@@ -97,8 +122,9 @@ struct Prepared {
 async fn compress_text(
     State(state): State<AppState>,
     Query(query): Query<CompressQuery>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
+    let body = body.map_err(body_rejection)?;
     if body.len() > state.config.max_body() {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -120,8 +146,7 @@ async fn compress_json(
     State(state): State<AppState>,
     payload: Result<Json<CompressJsonRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(request) =
-        payload.map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    let Json(request) = payload.map_err(json_rejection)?;
 
     let charset = parse_charset(request.charset.as_deref())?;
     let format = parse_format(request.format.as_deref())?;
@@ -133,7 +158,7 @@ async fn compress_json(
     if bytes.len() > state.config.max_body() {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "compressed text exceeds the configured limit",
+            "text exceeds the configured limit",
         ));
     }
 
@@ -144,22 +169,18 @@ async fn compress_json(
 async fn compress_file(
     State(state): State<AppState>,
     Query(query): Query<FileQuery>,
-    mut multipart: Multipart,
+    multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Response, ApiError> {
+    let mut multipart = multipart.map_err(|err| {
+        ApiError::bad_request(format!("invalid multipart body: {}", err.body_text()))
+    })?;
     let mut upload: Option<(Option<String>, Vec<u8>)> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("invalid multipart body: {err}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(multipart_rejection)? {
         if field.name() != Some("file") {
             continue;
         }
         let name = field.file_name().map(str::to_string);
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|err| ApiError::bad_request(format!("failed to read file field: {err}")))?;
+        let bytes = field.bytes().await.map_err(multipart_rejection)?;
         upload = Some((name, bytes.to_vec()));
         break;
     }
@@ -398,6 +419,41 @@ where
     let value = HeaderValue::from_str(&value.to_string())
         .unwrap_or_else(|_| HeaderValue::from_static("invalid"));
     headers.insert(name, value);
+}
+
+fn body_rejection(err: BytesRejection) -> ApiError {
+    let status = err.status();
+    let message = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "request body exceeds the configured limit".to_string()
+    } else {
+        format!("failed to read request body: {}", err.body_text())
+    };
+    ApiError::new(status, message)
+}
+
+fn json_rejection(err: JsonRejection) -> ApiError {
+    if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body exceeds the configured limit",
+        )
+    } else {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid JSON body: {}", err.body_text()),
+        )
+    }
+}
+
+fn multipart_rejection(err: MultipartError) -> ApiError {
+    if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "uploaded file exceeds the configured limit",
+        )
+    } else {
+        ApiError::bad_request(format!("invalid multipart body: {}", err.body_text()))
+    }
 }
 
 struct ApiError {

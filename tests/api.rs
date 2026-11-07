@@ -131,6 +131,58 @@ async fn bad_mode_is_rejected() {
 async fn oversized_bodies_are_rejected() {
     let response = send(app(16), post("/api/compress", "x".repeat(1024))).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(text_of(response).await.contains("\"error\""));
+}
+
+#[tokio::test]
+async fn oversized_json_bodies_keep_413() {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/compress/json")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!("{{\"text\":\"{}\"}}", "x".repeat(1024))))
+        .expect("request builds");
+
+    let response = send(app(16), request).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(text_of(response).await.contains("\"error\""));
+}
+
+#[tokio::test]
+async fn oversized_uploads_keep_413() {
+    let response = send(
+        app(16),
+        multipart_request("/api/compress/file", "big.log", &"x".repeat(1024)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(text_of(response).await.contains("\"error\""));
+}
+
+#[tokio::test]
+async fn unknown_routes_and_methods_return_json() {
+    let not_found = send(
+        app(1024),
+        Request::builder()
+            .uri("/nope")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+    assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+    assert!(text_of(not_found).await.contains("\"error\""));
+
+    let not_allowed = send(
+        app(1024),
+        Request::builder()
+            .method("GET")
+            .uri("/api/compress")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+    assert_eq!(not_allowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(text_of(not_allowed).await.contains("\"error\""));
 }
 
 #[tokio::test]
