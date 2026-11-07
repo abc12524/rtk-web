@@ -31,11 +31,12 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CompressOptions {
     pub format: ContentFormat,
     pub mode: Mode,
     pub lossless: bool,
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +79,17 @@ impl Stats {
 }
 
 pub fn compress(input: &str, options: CompressOptions) -> CompressOutput {
+    if let Some(name) = options.filter.as_deref() {
+        if let Some(text) = rtk::filter_api::apply(name, input) {
+            return CompressOutput {
+                changed: text != input,
+                text,
+                chain: vec![format!("filter:{name}")],
+                lossy: true,
+            };
+        }
+    }
+
     if options.lossless {
         return run(input, &LOSSLESS_CHAIN, false);
     }
@@ -138,7 +150,27 @@ mod tests {
             format: ContentFormat::Term,
             mode,
             lossless,
+            filter: None,
         }
+    }
+
+    #[test]
+    fn named_filter_runs_the_command_specific_parser() {
+        let raw = "total 8\n\
+                   drwxr-xr-x  2 root root 4096 Nov  7 10:00 src\n\
+                   -rw-r--r--  1 root root  341 Nov  7 09:00 hello.go\n";
+        let out = compress(
+            raw,
+            CompressOptions {
+                format: ContentFormat::Term,
+                mode: Mode::Chain,
+                lossless: false,
+                filter: Some("ls".to_string()),
+            },
+        );
+        assert!(out.text.contains("755  src/"), "{}", out.text);
+        assert!(out.text.contains("644  hello.go"), "{}", out.text);
+        assert_eq!(out.chain, vec!["filter:ls".to_string()]);
     }
 
     #[test]

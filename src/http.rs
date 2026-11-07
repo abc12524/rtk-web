@@ -41,13 +41,22 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     let max_body = state.config.max_body();
     Router::new()
+        .route("/", get(docs))
         .route("/health", get(health))
         .route("/api/formats", get(formats))
+        .route("/api/filters", get(filters))
         .route("/api/compress", post(compress_text))
         .route("/api/compress/json", post(compress_json))
         .route("/api/compress/file", post(compress_file))
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state)
+}
+
+async fn docs() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        include_str!("docs.md"),
+    )
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -62,12 +71,17 @@ async fn formats() -> Json<Vec<&'static str>> {
     Json(vec!["term", "json", "web", "matches", "lockfile", "auto"])
 }
 
+async fn filters() -> Json<Vec<&'static str>> {
+    Json(rtk::filter_api::names().to_vec())
+}
+
 #[derive(Debug, Deserialize)]
 struct CompressQuery {
     format: Option<String>,
     mode: Option<String>,
     lossless: Option<bool>,
     charset: Option<String>,
+    filter: Option<String>,
 }
 
 struct Prepared {
@@ -77,6 +91,7 @@ struct Prepared {
     mode: Mode,
     charset: Charset,
     lossless: bool,
+    filter: Option<String>,
 }
 
 async fn compress_text(
@@ -95,8 +110,9 @@ async fn compress_text(
     let format = parse_format(query.format.as_deref())?;
     let mode = parse_mode(query.mode.as_deref())?;
     let lossless = query.lossless.unwrap_or(false);
+    let filter = parse_filter(query.filter.as_deref())?;
 
-    let prepared = execute(&state, body.to_vec(), charset, format, mode, lossless).await?;
+    let prepared = execute(&state, body.to_vec(), charset, format, mode, lossless, filter).await?;
     Ok(text_response(prepared))
 }
 
@@ -111,6 +127,7 @@ async fn compress_json(
     let format = parse_format(request.format.as_deref())?;
     let mode = parse_mode(request.mode.as_deref())?;
     let lossless = request.lossless;
+    let filter = parse_filter(request.filter.as_deref())?;
 
     let bytes = request.text.into_bytes();
     if bytes.len() > state.config.max_body() {
@@ -120,7 +137,7 @@ async fn compress_json(
         ));
     }
 
-    let prepared = execute(&state, bytes, charset, format, mode, lossless).await?;
+    let prepared = execute(&state, bytes, charset, format, mode, lossless, filter).await?;
     Ok(Json(json_response(prepared, None)).into_response())
 }
 
@@ -175,8 +192,9 @@ async fn compress_file(
     };
     let mode = parse_mode(query.mode.as_deref())?;
     let lossless = query.lossless.unwrap_or(false);
+    let filter = parse_filter(query.filter.as_deref())?;
 
-    let prepared = execute(&state, bytes, charset, format, mode, lossless).await?;
+    let prepared = execute(&state, bytes, charset, format, mode, lossless, filter).await?;
 
     match query.response.as_deref() {
         None | Some("text") => Ok(text_response(prepared)),
@@ -194,6 +212,7 @@ struct FileQuery {
     lossless: Option<bool>,
     charset: Option<String>,
     response: Option<String>,
+    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +223,7 @@ struct CompressJsonRequest {
     #[serde(default)]
     lossless: bool,
     charset: Option<String>,
+    filter: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,6 +238,8 @@ struct CompressJsonResponse {
     stats: Stats,
     #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter: Option<String>,
 }
 
 fn json_response(prepared: Prepared, filename: Option<String>) -> CompressJsonResponse {
@@ -231,6 +253,7 @@ fn json_response(prepared: Prepared, filename: Option<String>) -> CompressJsonRe
         changed: prepared.output.changed,
         stats: prepared.stats,
         filename,
+        filter: prepared.filter,
     }
 }
 
@@ -241,6 +264,7 @@ async fn execute(
     format: FormatSpec,
     mode: Mode,
     lossless: bool,
+    filter: Option<String>,
 ) -> Result<Prepared, ApiError> {
     let permit = state
         .permits
@@ -264,6 +288,7 @@ async fn execute(
                 format,
                 mode: actual_mode,
                 lossless,
+                filter: filter.clone(),
             },
         );
         let stats = Stats::new(&text, &output.text);
@@ -274,6 +299,7 @@ async fn execute(
             mode: actual_mode,
             charset,
             lossless,
+            filter,
         })
     });
 
@@ -318,6 +344,22 @@ fn parse_mode(value: Option<&str>) -> Result<Mode, ApiError> {
     }
 }
 
+fn parse_filter(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    match value {
+        Some(raw) => {
+            let name = raw.trim().to_ascii_lowercase();
+            if rtk::filter_api::names().iter().any(|known| *known == name) {
+                Ok(Some(name))
+            } else {
+                Err(ApiError::bad_request(format!(
+                    "unsupported filter `{raw}`; see GET /api/filters"
+                )))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 fn text_response(prepared: Prepared) -> Response {
     let mut response = prepared.output.text.clone().into_response();
     let headers = response.headers_mut();
@@ -329,6 +371,7 @@ fn text_response(prepared: Prepared) -> Response {
     insert_header(headers, "x-rtk-mode", prepared.mode.as_str());
     insert_header(headers, "x-rtk-charset", prepared.charset.as_str());
     insert_header(headers, "x-rtk-lossless", prepared.lossless);
+    insert_header(headers, "x-rtk-filter", prepared.filter.as_deref().unwrap_or("-"));
     insert_header(headers, "x-rtk-lossy", prepared.output.lossy);
     insert_header(headers, "x-rtk-changed", prepared.output.changed);
     insert_header(

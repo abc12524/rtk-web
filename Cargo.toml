@@ -7,6 +7,7 @@ publish = false
 description = "HTTP service that compresses bash / PowerShell output with the rtk engine"
 
 [dependencies]
+rtk = { path = "../rtk" }
 rtk-engine = { path = "../rtk/engine" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }

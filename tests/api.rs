@@ -273,3 +273,41 @@ async fn binary_upload_is_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(text_of(response).await.contains("binary"));
 }
+#[tokio::test]
+async fn named_filter_compresses_ls_output() {
+    let raw = "total 8\n\
+               drwxr-xr-x  2 root root 4096 Nov  7 10:00 src\n\
+               -rw-r--r--  1 root root  341 Nov  7 09:00 hello.go\n";
+    let response = send(app(4096), post("/api/compress?filter=ls", raw)).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_of(&response, "x-rtk-filter"), Some("ls"));
+    let body = text_of(response).await;
+    assert!(body.contains("755  src/"), "{body}");
+    assert!(!body.contains("total"), "{body}");
+}
+
+#[tokio::test]
+async fn unknown_filter_is_rejected() {
+    let response = send(app(1024), post("/api/compress?filter=nope", "x")).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(text_of(response).await.contains("unsupported filter"));
+}
+
+#[tokio::test]
+async fn filters_endpoint_lists_registered_names() {
+    let response = send(
+        app(1024),
+        Request::builder()
+            .uri("/api/filters")
+            .body(Body::empty())
+            .expect("request builds"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = text_of(response).await;
+    assert!(body.contains("\"ls\""), "{body}");
+    assert!(body.contains("\"cargo-test\""), "{body}");
+}

@@ -54,6 +54,14 @@ cargo run
 ["term","json","web","matches","lockfile","auto"]
 ```
 
+### GET /api/filters
+
+返回已注册的命令专属过滤器名称。
+
+```json
+["black","cargo","cargo-build","cargo-clippy","ls","pytest","tsc", "..."]
+```
+
 ### POST /api/compress
 
 请求体是原始文本，响应体是压缩后的文本。统计信息放在响应头。
@@ -70,6 +78,21 @@ curl -X POST \
 | `mode` | `chain` | `chain`（固定链，可预期）/ `auto`（形状感知，激进有损） |
 | `lossless` | `false` | `true` 时只执行 `ansi + dedup`，不截断 |
 | `charset` | `auto` | `auto` / `utf-8` / `utf-16le` / `utf-16be` / `gbk` |
+| `filter` | 无 | 命令专属过滤器名称，见 `GET /api/filters`；优先于 `format` / `mode` / `lossless` |
+
+指定 `filter` 时，服务调用 `src/cmds` 中对应的命令专属解析器，而不是通用链：
+
+```bash
+# ls -l（支持中英文 locale）
+ls -l | curl -X POST --data-binary @- \
+  "http://127.0.0.1:8787/api/compress?filter=ls"
+
+# cargo test
+cargo test 2>&1 | curl -X POST --data-binary @- \
+  "http://127.0.0.1:8787/api/compress?filter=cargo-test"
+```
+
+`filter` 的输入必须是对应命令的原始输出。部分过滤器要求特定格式，例如 `git-status` 需要 `git status --porcelain -b`，`go-test` 需要 `go test -json`；格式不匹配时过滤器通常会回退原文。
 
 响应头：
 
@@ -186,6 +209,40 @@ curl -X POST "http://127.0.0.1:8787/api/compress/file?format=term&lossless=true"
 - `auto` 模式：形状感知策略，压缩率更高，但会明显丢内容，仅建议显式开启。
 - `lossless=true`：只运行 `ansi` 与 `dedup`。`dedup` 会把连续重复行折叠为 `[xN]`，属于语义无损。
 - 引擎的 `never_worse` 保护保证输出不会比输入更大；方法 panic 时回退原文。
+
+## Python 客户端
+
+`scripts/rtk_client.py` 只依赖 Python 标准库。
+
+```bash
+# 压缩 stdin
+printf 'a\na\na\n' | python scripts/rtk_client.py text
+
+# 上传文件（按文件名推断格式）
+python scripts/rtk_client.py file build.log
+
+# 查看压缩统计（写到 stderr）
+python scripts/rtk_client.py file build.log --stats
+
+# 输出结构化 JSON
+python scripts/rtk_client.py file build.log --json
+
+# 执行命令并压缩它的 stdout + stderr
+python scripts/rtk_client.py run -- cargo test -- --nocapture
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--url` | 服务地址，默认 `http://192.168.30.181:8787`，也可用 `RTK_WEB_URL` 环境变量 |
+| `--format` | `term` / `json` / `web` / `matches` / `lockfile` / `auto` |
+| `--mode` | `chain`（默认）或 `auto` |
+| `--lossless` | 只执行 `ansi + dedup` |
+| `--charset` | `auto` / `utf-8` / `utf-16le` / `utf-16be` / `gbk` |
+| `--json` | 输出结构化 JSON |
+| `--stats` | 把 `X-Rtk-*` 统计写到 stderr |
+| `--timeout` | 请求超时秒数，默认 60 |
+
+`run` 模式会保留子进程的退出码。
 
 ## 测试
 
