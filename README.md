@@ -2,26 +2,27 @@
 
 把 bash / PowerShell 的原始输出文本交给 rtk 压缩引擎，返回压缩后的内容。服务不执行任何命令，只处理文本。
 
-## 与 rtk 仓库的关系
+## 依赖结构
 
-本服务只依赖 `rtk-engine`：
-
-```toml
-rtk-engine = { path = "../rtk/engine" }
-```
-
-默认假定本目录与 `rtk` 仓库同级：
+rtk 的源码已内嵌在 `vendor/rtk`，仓库自包含，克隆后可直接构建，不再需要同级 `rtk` 目录。
 
 ```text
-Desktop/
-├── rtk/
-│   └── engine/
-└── rtk-web/
+rtk-web/
+├── vendor/rtk/     # rtk CLI、rtk-engine、rtk-text、plugin
+├── src/
+└── Cargo.toml
 ```
 
-如果目录结构不同，修改 `Cargo.toml` 中的路径。
+`Cargo.toml` 使用：
 
-> `rtk-engine` 的许可证是 **BUSL-1.1**。内部自用生产免费；对外提供托管服务需要先获得 rtk-ai 授权。
+```toml
+rtk = { path = "vendor/rtk" }
+rtk-engine = { path = "vendor/rtk/engine" }
+```
+
+升级 rtk 时，用上游源码覆盖 `vendor/rtk`，再重新应用本仓库对 `src/filter_api.rs`、`src/cmds/system/ls.rs` 等文件的改动。
+
+> `rtk-engine` 的许可证是 **BUSL-1.1**，`vendor/rtk/LICENSE` 是 Apache-2.0。内部自用生产免费；对外提供托管服务需要先获得 rtk-ai 授权。
 
 ## 运行
 
