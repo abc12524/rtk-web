@@ -1,0 +1,32 @@
+[Unit]
+Description=RTK output compression web service
+Documentation=https://192.168.30.181:7000/
+After=network.target
+
+[Service]
+Type=simple
+User=rtk-web
+Group=rtk-web
+ExecStart=/opt/rtk-web/rtk-web
+Environment=RTK_WEB_ADDR=0.0.0.0:8787
+Environment=RTK_WEB_MAX_BODY=10485760
+Environment=RTK_WEB_MAX_CONCURRENCY=8
+Environment=RTK_WEB_TIMEOUT_MS=30000
+Environment=RUST_LOG=rtk_web=info
+Environment=RTK_TEE=0
+Environment=RTK_RECALL=0
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
