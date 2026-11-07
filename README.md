@@ -6,6 +6,8 @@
 
 rtk 的源码已内嵌在 `vendor/rtk`，仓库自包含，克隆后可直接构建，不再需要同级 `rtk` 目录。
 
+rtk 上游仓库：[https://github.com/rtk-ai/rtk](https://github.com/rtk-ai/rtk)
+
 ```text
 rtk-web/
 ├── vendor/rtk/     # rtk CLI、rtk-engine、rtk-text、plugin
@@ -244,6 +246,17 @@ python scripts/rtk_client.py run -- cargo test -- --nocapture
 | `--timeout` | 请求超时秒数，默认 60 |
 
 `run` 模式会保留子进程的退出码。
+
+## 发布
+
+`.github/workflows/release.yml` 是手动触发的发布流程（GitHub Actions）：
+
+1. 修改 `Cargo.toml` 的版本号并提交；
+2. 在 Actions → **Release** → **Run workflow** 中触发，`tag` 留空会自动使用 `v<版本>`；
+3. 流程在 `ubuntu-24.04` 上编译，产出 `rtk-web-<版本>-linux-x86_64.tar.gz` 和 `SHA256SUMS`；
+4. 自动创建对应 GitHub Release 并上传资产，可选 pre-release / draft。
+
+发布包内包含 `rtk-web` 二进制、`rtk_client.py`、systemd 单元文件和 README，要求 glibc >= 2.39。
 
 ## 测试
 
