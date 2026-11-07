@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布 tag（留空则使用 v<Cargo.toml 版本>）"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "标记为 pre-release"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "创建为草稿（draft）"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-x86_64
+
+      - name: Resolve release metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::Cargo.toml 中找不到 package version"
+            exit 1
+          fi
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag="v$version"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) tag="v$tag" ;;
+          esac
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag 与 Cargo.toml 版本 $version 不一致，请先升级版本号再发布"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=rtk-web-$version-linux-x86_64" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$NAME"
+          install -m 755 target/release/rtk-web "dist/$NAME/rtk-web"
+          install -m 644 README.md "dist/$NAME/README.md"
+          install -m 755 scripts/rtk_client.py "dist/$NAME/rtk_client.py"
+          install -m 644 deploy/rtk-web.service "dist/$NAME/rtk-web.service"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > SHA256SUMS)
+          {
+            echo "## rtk-web $VERSION"
+            echo
+            echo "Linux x86_64 发布包，构建环境 glibc >= 2.39。"
+            echo
+            echo "### 安装"
+            echo
+            echo '```bash'
+            echo "tar -xzf $NAME.tar.gz"
+            echo "cd $NAME"
+            echo "sudo install -m 755 rtk-web /opt/rtk-web/rtk-web"
+            echo "sudo systemctl restart rtk-web"
+            echo '```'
+            echo
+            echo "### 校验"
+            echo
+            echo '```bash'
+            echo "sha256sum -c SHA256SUMS"
+            echo '```'
+          } > dist/RELEASE_NOTES.md
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          NAME: ${{ steps.meta.outputs.name }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          assets=("dist/$NAME.tar.gz" "dist/SHA256SUMS")
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，覆盖上传资产"
+            gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            args=(
+              --repo "$GITHUB_REPOSITORY"
+              --title "rtk-web $TAG"
+              --notes-file dist/RELEASE_NOTES.md
+              --target "$GITHUB_SHA"
+            )
+            if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            if [ "$DRAFT" = "true" ]; then
+              args+=(--draft)
+            fi
+            gh release create "$TAG" "${assets[@]}" "${args[@]}"
+          fi
+          {
+            echo "### Release"
+            echo
+            echo "已发布 \`$TAG\`：$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          } >> "$GITHUB_STEP_SUMMARY"
