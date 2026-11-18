@@ -82,6 +82,7 @@ curl -X POST \
 | `lossless` | `false` | `true` 时只执行 `ansi + dedup`，不截断 |
 | `charset` | `auto` | `auto` / `utf-8` / `utf-16le` / `utf-16be` / `gbk` |
 | `filter` | 无 | 命令专属过滤器名称，见 `GET /api/filters`；优先于 `format` / `mode` / `lossless` |
+| `max_chars` | 无 | 输出字符上限（200 ~ 4 MiB）。给了就保证结果不超过它，且按内容重要性裁剪而非砍尾巴 |
 
 指定 `filter` 时，服务调用 `src/cmds` 中对应的命令专属解析器，而不是通用链：
 
@@ -94,6 +95,23 @@ ls -l | curl -X POST --data-binary @- \
 cargo test 2>&1 | curl -X POST --data-binary @- \
   "http://127.0.0.1:8787/api/compress?filter=cargo-test"
 ```
+
+### 按预算裁剪：`max_chars`
+
+调用方（shell-tool / go-shell 这类宿主）通常要把命令输出塞进模型上下文，自己按字符数截断。
+那种盲切砍掉的是**尾巴**，而报错往往就在尾巴上。传 `max_chars` 让服务端裁：
+
+```bash
+ls -l /usr/bin | curl -X POST --data-binary @- \
+  "http://127.0.0.1:8787/api/compress?mode=auto&max_chars=6000"
+```
+
+裁剪顺序：首行（表头 / 总计）→ 命中 `error` / `warn` / `fail` / `panic` / `denied` /
+`not found` / `错误` / `失败` 等关键字的行（从尾部优先）→ 尾段 → 剩余预算在中间行等间隔采样。
+每段空缺都留一条 `[… N lines elided …]`，与 `cap` / `strategy` 的标记一致；
+响应头 `X-Rtk-Max-Chars` 回显生效的预算，`X-Rtk-Chain` 里出现 `budget` 表示裁过。
+
+预算内装得下就完全不裁（原样返回，不产生 `budget` 阶段）。
 
 `filter` 的输入必须是对应命令的原始输出。部分过滤器要求特定格式，例如 `git-status` 需要 `git status --porcelain -b`，`go-test` 需要 `go test -json`；格式不匹配时过滤器通常会回退原文。
 

@@ -61,6 +61,12 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "name=rtk-web-$version-linux-x86_64" >> "$GITHUB_OUTPUT"
 
+      - name: Test
+        shell: bash
+        run: |
+          export PATH="/root/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
+          cargo test --locked
+
       - name: Build release binary
         shell: bash
         run: |

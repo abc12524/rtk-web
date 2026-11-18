@@ -107,6 +107,7 @@ struct CompressQuery {
     lossless: Option<bool>,
     charset: Option<String>,
     filter: Option<String>,
+    max_chars: Option<usize>,
 }
 
 struct Prepared {
@@ -117,6 +118,7 @@ struct Prepared {
     charset: Charset,
     lossless: bool,
     filter: Option<String>,
+    max_chars: Option<usize>,
 }
 
 async fn compress_text(
@@ -137,8 +139,12 @@ async fn compress_text(
     let mode = parse_mode(query.mode.as_deref())?;
     let lossless = query.lossless.unwrap_or(false);
     let filter = parse_filter(query.filter.as_deref())?;
+    let max_chars = parse_max_chars(query.max_chars)?;
 
-    let prepared = execute(&state, body.to_vec(), charset, format, mode, lossless, filter).await?;
+    let prepared = execute(
+        &state, body.to_vec(), charset, format, mode, lossless, filter, max_chars,
+    )
+    .await?;
     Ok(text_response(prepared))
 }
 
@@ -153,6 +159,7 @@ async fn compress_json(
     let mode = parse_mode(request.mode.as_deref())?;
     let lossless = request.lossless;
     let filter = parse_filter(request.filter.as_deref())?;
+    let max_chars = parse_max_chars(request.max_chars)?;
 
     let bytes = request.text.into_bytes();
     if bytes.len() > state.config.max_body() {
@@ -162,7 +169,10 @@ async fn compress_json(
         ));
     }
 
-    let prepared = execute(&state, bytes, charset, format, mode, lossless, filter).await?;
+    let prepared = execute(
+        &state, bytes, charset, format, mode, lossless, filter, max_chars,
+    )
+    .await?;
     Ok(Json(json_response(prepared, None)).into_response())
 }
 
@@ -214,8 +224,12 @@ async fn compress_file(
     let mode = parse_mode(query.mode.as_deref())?;
     let lossless = query.lossless.unwrap_or(false);
     let filter = parse_filter(query.filter.as_deref())?;
+    let max_chars = parse_max_chars(query.max_chars)?;
 
-    let prepared = execute(&state, bytes, charset, format, mode, lossless, filter).await?;
+    let prepared = execute(
+        &state, bytes, charset, format, mode, lossless, filter, max_chars,
+    )
+    .await?;
 
     match query.response.as_deref() {
         None | Some("text") => Ok(text_response(prepared)),
@@ -234,6 +248,7 @@ struct FileQuery {
     charset: Option<String>,
     response: Option<String>,
     filter: Option<String>,
+    max_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +260,7 @@ struct CompressJsonRequest {
     lossless: bool,
     charset: Option<String>,
     filter: Option<String>,
+    max_chars: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,6 +277,8 @@ struct CompressJsonResponse {
     filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_chars: Option<usize>,
 }
 
 fn json_response(prepared: Prepared, filename: Option<String>) -> CompressJsonResponse {
@@ -275,6 +293,7 @@ fn json_response(prepared: Prepared, filename: Option<String>) -> CompressJsonRe
         stats: prepared.stats,
         filename,
         filter: prepared.filter,
+        max_chars: prepared.max_chars,
     }
 }
 
@@ -286,6 +305,7 @@ async fn execute(
     mode: Mode,
     lossless: bool,
     filter: Option<String>,
+    max_chars: Option<usize>,
 ) -> Result<Prepared, ApiError> {
     let permit = state
         .permits
@@ -310,6 +330,7 @@ async fn execute(
                 mode: actual_mode,
                 lossless,
                 filter: filter.clone(),
+                max_chars,
             },
         );
         let stats = Stats::new(&text, &output.text);
@@ -321,6 +342,7 @@ async fn execute(
             charset,
             lossless,
             filter,
+            max_chars,
         })
     });
 
@@ -365,8 +387,7 @@ fn parse_mode(value: Option<&str>) -> Result<Mode, ApiError> {
     }
 }
 
-fn parse_filter(value: Option<&str>) -> Result<Option<String>, ApiError> {
-    match value {
+fn parse_filter(value: Option<&str>) -> Result<Option<String>, ApiError> {    match value {
         Some(raw) => {
             let name = raw.trim().to_ascii_lowercase();
             if rtk::filter_api::names().iter().any(|known| *known == name) {
@@ -409,7 +430,30 @@ fn text_response(prepared: Prepared) -> Response {
     insert_header(headers, "x-rtk-saved-percent", prepared.stats.saved_percent);
     insert_header(headers, "x-rtk-tokens-before", prepared.stats.tokens_before);
     insert_header(headers, "x-rtk-tokens-after", prepared.stats.tokens_after);
+    insert_header(
+        headers,
+        "x-rtk-max-chars",
+        prepared
+            .max_chars
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
     response
+}
+
+/// `max_chars` 的合法区间：太小连一条省略标记都放不下，太大就没必要裁。
+fn parse_max_chars(value: Option<usize>) -> Result<Option<usize>, ApiError> {
+    match value {
+        None => Ok(None),
+        Some(n) if (crate::budget::MIN_BUDGET..=crate::budget::MAX_BUDGET).contains(&n) => {
+            Ok(Some(n))
+        }
+        Some(n) => Err(ApiError::bad_request(format!(
+            "max_chars out of range: {n} (use {}..={})",
+            crate::budget::MIN_BUDGET,
+            crate::budget::MAX_BUDGET
+        ))),
+    }
 }
 
 fn insert_header<K>(headers: &mut HeaderMap, name: K, value: impl ToString)

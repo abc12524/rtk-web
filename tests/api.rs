@@ -363,3 +363,60 @@ async fn filters_endpoint_lists_registered_names() {
     assert!(body.contains("\"ls\""), "{body}");
     assert!(body.contains("\"cargo-test\""), "{body}");
 }
+#[tokio::test]
+async fn max_chars_budget_fits_and_keeps_the_trailing_error() {
+    let mut input = String::new();
+    for i in 0..4000 {
+        input.push_str(&format!("INFO step {i}\n"));
+    }
+    input.push_str("ERROR disk quota exceeded\n");
+
+    let response = send(app(1 << 20), post("/api/compress?max_chars=600", input)).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_of(&response, "x-rtk-max-chars"), Some("600"));
+    let body = text_of(response).await;
+    assert!(
+        body.chars().count() <= 600,
+        "budget exceeded: {} chars",
+        body.chars().count()
+    );
+    assert!(
+        body.contains("ERROR disk quota exceeded"),
+        "尾部报错被裁掉了：{body}"
+    );
+    assert!(body.contains("lines elided"), "{body}");
+}
+
+#[tokio::test]
+async fn out_of_range_max_chars_is_rejected() {
+    let response = send(app(1024), post("/api/compress?max_chars=10", "a\nb")).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(text_of(response).await.contains("max_chars out of range"));
+}
+
+#[tokio::test]
+async fn json_endpoint_reports_the_applied_budget() {
+    let mut input = String::new();
+    for i in 0..2000 {
+        input.push_str(&format!("line {i}\n"));
+    }
+    input.push_str("fatal: cannot continue\n");
+
+    let payload = format!(
+        "{{\"text\":{},\"mode\":\"chain\",\"format\":\"term\",\"max_chars\":700}}",
+        serde_json::to_string(&input).expect("input serializes")
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/compress/json")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload))
+        .expect("request builds");
+    let response = send(app(1 << 20), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = text_of(response).await;
+    assert!(body.contains("\"max_chars\":700"), "{body}");
+    assert!(body.contains("fatal: cannot continue"), "{body}");
+}

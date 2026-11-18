@@ -34,6 +34,7 @@ STATUS_HEADERS = (
     "x-rtk-saved-percent",
     "x-rtk-tokens-before",
     "x-rtk-tokens-after",
+    "x-rtk-max-chars",
 )
 
 
@@ -56,6 +57,8 @@ def build_query(args: argparse.Namespace, response: str | None = None) -> str:
         params["format"] = args.format
     if response:
         params["response"] = response
+    if getattr(args, "max_chars", None):
+        params["max_chars"] = str(args.max_chars)
     return urllib.parse.urlencode(params)
 
 
@@ -168,6 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--mode", choices=("chain", "auto"), default="chain")
     common.add_argument("--lossless", action="store_true", help="只做 ANSI 清理与重复行折叠")
+    common.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        help="输出字符上限；超了按重要性裁剪（保报错行 / 首尾 / 采样中间）",
+    )
     common.add_argument(
         "--charset",
         choices=("auto", "utf-8", "utf-16le", "utf-16be", "gbk"),

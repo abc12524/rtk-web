@@ -54,6 +54,7 @@ command 2>&1 | curl -X POST --data-binary @- \
 | `lossless` | `false` | `true` 时只执行 `ansi + dedup`，不截断 |
 | `charset` | `auto` | `auto` / `utf-8` / `utf-16le` / `utf-16be` / `gbk` |
 | `filter` | 无 | 命令专属过滤器名称，优先于 `format` / `mode` / `lossless` |
+| `max_chars` | 无 | 输出字符上限（200 ~ 4194304）；按重要性裁剪，超出才生效 |
 
 ### 响应头
 
@@ -103,7 +104,7 @@ curl -X POST http://192.168.30.181:8787/api/compress/json \
 }
 ```
 
-请求字段：`text`（必填）、`format`、`mode`、`lossless`、`charset`、`filter`。指定 `filter` 时响应会带 `"filter": "ls"`。
+请求字段：`text`（必填）、`format`、`mode`、`lossless`、`charset`、`filter`、`max_chars`。指定 `filter` 时响应会带 `"filter": "ls"`。
 
 ## 文件上传 <font style="background:#F6E1AC;color:#664900">multipart</font>
 

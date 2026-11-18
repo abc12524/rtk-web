@@ -6,6 +6,8 @@ use rtk_engine::strategy;
 use rtk_engine::tokens::estimate_tokens;
 use serde::Serialize;
 
+use crate::budget;
+
 static LOSSLESS_CHAIN: [&dyn Method; 2] = [&ANSI, &DEDUP];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,9 @@ pub struct CompressOptions {
     pub mode: Mode,
     pub lossless: bool,
     pub filter: Option<String>,
+    /// 输出字符上限。给了就保证结果不超过它（按字符计，与调用方的截断口径一致），
+    /// 且裁剪按内容重要性取舍而不是砍尾巴——见 [`crate::budget`]。
+    pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +83,29 @@ impl Stats {
     }
 }
 
+/// 压缩入口：先跑格式链，再按调用方给的预算做知情裁剪。
 pub fn compress(input: &str, options: CompressOptions) -> CompressOutput {
+    let max_chars = options.max_chars;
+    let mut out = compress_raw(input, options);
+    apply_budget(&mut out, max_chars);
+    out
+}
+
+/// 预算裁剪：只负责把 `max_chars` 落下去，取舍逻辑全在 [`crate::budget`]。
+fn apply_budget(out: &mut CompressOutput, max_chars: Option<usize>) {
+    let Some(max) = max_chars else { return };
+    let Some(fitted) = budget::fit(&out.text, max) else {
+        return;
+    };
+    out.text = fitted.text;
+    out.lossy = true;
+    out.changed = true;
+    if !out.chain.iter().any(|chain| chain == "budget") {
+        out.chain.push("budget".to_string());
+    }
+}
+
+fn compress_raw(input: &str, options: CompressOptions) -> CompressOutput {
     if let Some(name) = options.filter.as_deref() {
         if let Some(text) = rtk::filter_api::apply(name, input) {
             return CompressOutput {
@@ -175,12 +202,54 @@ mod tests {
             mode,
             lossless,
             filter: None,
+            max_chars: None,
         }
     }
 
     #[test]
-    fn named_filter_runs_the_command_specific_parser() {
-        let raw = "total 8\n\
+    fn max_chars_budget_is_enforced_and_tagged() {
+        let mut input: String = (0..3000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        input.push_str("\nERROR the important bit");
+        let out = compress(
+            &input,
+            CompressOptions {
+                format: ContentFormat::Term,
+                mode: Mode::Chain,
+                lossless: false,
+                filter: None,
+                max_chars: Some(800),
+            },
+        );
+        assert!(
+            out.text.chars().count() <= 800,
+            "got {} chars",
+            out.text.chars().count()
+        );
+        assert!(out.text.contains("ERROR the important bit"), "{}", out.text);
+        assert!(out.chain.iter().any(|chain| chain == "budget"));
+        assert!(out.lossy);
+    }
+
+    #[test]
+    fn max_chars_within_budget_leaves_the_chain_untouched() {
+        let out = compress(
+            "alpha\nbeta\n",
+            CompressOptions {
+                format: ContentFormat::Term,
+                mode: Mode::Chain,
+                lossless: false,
+                filter: None,
+                max_chars: Some(6000),
+            },
+        );
+        assert!(!out.chain.iter().any(|chain| chain == "budget"));
+    }
+
+    #[test]
+    fn named_filter_runs_the_command_specific_parser() {        let raw = "total 8\n\
                    drwxr-xr-x  2 root root 4096 Nov  7 10:00 src\n\
                    -rw-r--r--  1 root root  341 Nov  7 09:00 hello.go\n";
         let out = compress(
@@ -190,6 +259,7 @@ mod tests {
                 mode: Mode::Chain,
                 lossless: false,
                 filter: Some("ls".to_string()),
+                max_chars: None,
             },
         );
         assert!(out.text.contains("755  src/"), "{}", out.text);

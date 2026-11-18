@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod compress;
 pub mod config;
 pub mod encoding;
