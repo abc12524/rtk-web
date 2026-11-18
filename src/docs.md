@@ -50,7 +50,7 @@ command 2>&1 | curl -X POST --data-binary @- \
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `format` | `term` | `term` / `json` / `web` / `matches` / `lockfile` / `auto` |
-| `mode` | `chain` | `chain`（固定链，可预期）/ `auto`（形状感知，激进有损） |
+| `mode` | `chain` | `chain`（固定链，可预期）/ `auto`（形状感知 + 命令输出自动识别，激进有损） |
 | `lossless` | `false` | `true` 时只执行 `ansi + dedup`，不截断 |
 | `charset` | `auto` | `auto` / `utf-8` / `utf-16le` / `utf-16be` / `gbk` |
 | `filter` | 无 | 命令专属过滤器名称，优先于 `format` / `mode` / `lossless` |
@@ -139,6 +139,8 @@ curl -X POST "http://192.168.30.181:8787/api/compress/file?filter=ls" \
 ## 命令专属过滤器 <font style="background:#F6E1AC;color:#664900">推荐用于结构化输出</font>
 
 传 `filter=<name>` 时，服务调用 rtk `src/cmds` 中的专用解析器，而不是通用链。它理解命令输出结构，会重排、缩写、删冗余，压缩率明显更高。
+
+> `mode=auto` 时无需显式传 `filter`：服务会嗅探输入形状，命中已知命令输出（目前识别 `ls -l` 权限行）就自动套用对应过滤器，响应头 `X-Rtk-Chain` 显示为 `auto>filter:ls`。未命中时退回形状感知策略。识别是"宁可不认"的保守判断，误判时过滤器本身只会原样返回，不会破坏内容。
 
 ```bash
 # ls -l（支持中英文 locale）
