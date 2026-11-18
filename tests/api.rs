@@ -339,6 +339,27 @@ async fn named_filter_compresses_ls_output() {
     assert!(!body.contains("total"), "{body}");
 }
 
+/// zh_CN locale: `ls -la` prints "11月  7 10:00" (no 日, like `Nov  7 10:00`).
+/// The auto detector used to miss it, so the listing fell through to the generic
+/// chain and came back byte-for-byte unchanged — this is the regression guard.
+#[tokio::test]
+async fn auto_detects_zh_cn_ls_listing() {
+    let raw = "总用量 8\n\
+               drwxr-xr-x  2 root root 4096 11月  7 10:00 src\n\
+               -rw-r--r--  1 root root  341 11月  7 09:00 hello.go\n\
+               -rw-r--r--  1 root root  120 11月  7  2025 old.log\n";
+    let response = send(app(4096), post("/api/compress?mode=auto&format=term", raw)).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let chain = header_of(&response, "x-rtk-chain").unwrap_or_default();
+    assert!(chain.contains("ls"), "chain={chain}");
+    let body = text_of(response).await;
+    assert!(body.contains("src/"), "{body}");
+    assert!(body.contains("hello.go"), "{body}");
+    assert!(!body.contains("总用量"), "{body}");
+    assert!(body.len() < raw.len(), "{body}");
+}
+
 #[tokio::test]
 async fn unknown_filter_is_rejected() {
     let response = send(app(1024), post("/api/compress?filter=nope", "x")).await;
@@ -419,4 +440,38 @@ async fn json_endpoint_reports_the_applied_budget() {
     let body = text_of(response).await;
     assert!(body.contains("\"max_chars\":700"), "{body}");
     assert!(body.contains("fatal: cannot continue"), "{body}");
+}
+
+/// `--time-style=long-iso` / `full-iso` / `iso` produce date columns the anchor
+/// regex has to know about too; full-iso used to fall through to the *grep*
+/// filter (a false positive) and barely shrank at all.
+#[tokio::test]
+async fn auto_detects_iso_time_styles() {
+    for (label, raw) in [
+        (
+            "long-iso",
+            "total 8\n\
+             -rw-r--r--  1 root root 3028 2022-08-30 00:05 adduser.conf\n\
+             -rw-r--r--  1 root root 1024 2022-08-30 00:06 gai.conf\n",
+        ),
+        (
+            "full-iso",
+            "total 8\n\
+             -rw-r--r--  1 root root 3028 2022-08-30 00:05:55.806736453 +0800 adduser.conf\n\
+             -rw-r--r--  1 root root 1024 2022-08-30 00:06:01.123456789 +0800 gai.conf\n",
+        ),
+        (
+            "iso",
+            "total 8\n\
+             -rw-r--r--  1 root root 3028 2022-08-30 adduser.conf\n\
+             -rw-r--r--  1 root root 1024 2022-08-30 gai.conf\n",
+        ),
+    ] {
+        let response = send(app(4096), post("/api/compress?mode=auto&format=term", raw)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{label}");
+        let chain = header_of(&response, "x-rtk-chain").unwrap_or_default();
+        assert!(chain.contains("filter:ls"), "{label}: chain={chain}");
+        let body = text_of(response).await;
+        assert!(body.contains("adduser.conf"), "{label}: {body}");
+    }
 }

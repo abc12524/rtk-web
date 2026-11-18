@@ -16,9 +16,25 @@ use std::sync::LazyLock;
 /// Matches the date+time portion in `ls -la` output, which serves as a
 /// stable anchor regardless of owner/group column width.
 /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+///
+/// Every shape GNU ls can print is covered, because a miss here silently
+/// disables the whole filter — the listing then falls through to the generic
+/// chain and comes back unchanged:
+///
+/// * default (C locale): `Mar 31 16:18` / `Dec 25  2024`
+/// * default (zh_CN):    `11月 18 13:59` / `11月 18  2025` — **no 日**, which
+///   is what every `ls -la` on a Chinese-locale host prints
+/// * zh_CN long form:    `2025年 11月 18日`
+/// * `--time-style=long-iso`: `2022-08-30 00:05`
+/// * `--time-style=full-iso`: `2022-08-30 00:05:55.806736453 +0800`
+/// * `--time-style=iso`:      `2022-08-30`
+///
+/// ISO forms are tried last: a bare `YYYY-MM-DD` is the only alternative that
+/// could also match part of a filename, and by ordering it last any real date
+/// earlier on the line wins first.
 static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\s+(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})|\d{4}年\s*\d{1,2}月\s*\d{1,2}日|\d{1,2}月\s*\d{1,2}日\s+\d{2}:\d{2})\s+"
+        r"\s+(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})|\d{4}年\s*\d{1,2}月\s*\d{1,2}日|\d{1,2}月\s*\d{1,2}日?\s+(?:\d{4}|\d{2}:\d{2})|\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s+[+-]\d{4})?)?)\s+"
     )
     .unwrap()
 });
@@ -354,7 +370,7 @@ pub(crate) fn render(raw: &str, native: Option<&str>, show_all: bool, show_long:
     // This is safer than returning "(empty)" for a non-empty directory.
     let has_real_content = raw
         .lines()
-        .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+        .any(|l| !l.starts_with("total ") && !l.starts_with("总用量") && !l.starts_with("总计") && !l.is_empty() && !is_dotdir(l));
     if parsed_count == 0 && has_real_content {
         return native
             .map_or(raw, |native| never_worse(native, raw))
@@ -589,7 +605,12 @@ fn compact_ls(
     let mut unparsed: Vec<String> = Vec::new();
 
     for line in raw.lines() {
-        if line.starts_with("total ") || line.is_empty() {
+        // "total 20" (en) / "总用量 20" (zh_CN) / "总计 20" are headers, not entries.
+        if line.starts_with("total ")
+            || line.starts_with("总用量")
+            || line.starts_with("总计")
+            || line.is_empty()
+        {
             continue;
         }
         lines_seen += 1;
@@ -705,6 +726,37 @@ mod tests {
         assert!(!entries.contains("total")); // no total
         assert!(!entries.contains("\n.\n")); // no . entry
         assert!(!entries.contains("\n..\n")); // no .. entry
+    }
+
+    /// zh_CN locale: GNU ls prints "11月 18 13:59" / "11月 18  2025", with no 日.
+    /// Before the date regex learned that form, every entry here failed to parse
+    /// and the whole listing came back unchanged.
+    #[test]
+    fn test_compact_zh_cn_dates() {
+        let input = "总用量 20\n\
+                     drwxr-xr-x  2 root root  4096 11月 18 13:59 src\n\
+                     -rw-r--r--  1 root root  1234 11月 18 13:59 Cargo.toml\n\
+                     -rw-r--r--  1 root root  5678 11月 18  2025 old.log\n";
+        let (entries, parsed, truncated, _hidden) = compact_ls(input, false, false);
+        assert_eq!(parsed, 3, "三条中文日期条目都应解析成功: {entries}");
+        assert!(truncated.is_empty());
+        assert!(entries.contains("src/"), "{entries}");
+        assert!(entries.contains("Cargo.toml"), "{entries}");
+        assert!(entries.contains("old.log"), "{entries}");
+    }
+
+    #[test]
+    fn test_compact_iso_time_styles() {
+        let input = "total 20\n\
+                     -rw-r--r--  1 root root  3028 2022-08-30 00:05 long-iso.conf\n\
+                     -rw-r--r--  1 root root  1024 2022-08-30 00:05:55.806736453 +0800 full-iso.conf\n\
+                     -rw-r--r--  1 root root   512 2022-08-30 iso.conf\n";
+        let (entries, parsed, truncated, _hidden) = compact_ls(input, false, false);
+        assert_eq!(parsed, 3, "三种 --time-style 都应解析: {entries}");
+        assert!(truncated.is_empty(), "{truncated:?}");
+        for name in ["long-iso.conf", "full-iso.conf", "iso.conf"] {
+            assert!(entries.contains(name), "缺 {name}: {entries}");
+        }
     }
 
     #[test]

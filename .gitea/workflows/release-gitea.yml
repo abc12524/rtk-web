@@ -2,7 +2,12 @@ name: Release (Gitea)
 
 # 在 Gitea Actions（act_runner / gitea-runner，host 模式）下构建并发布 Release。
 # 与 .github/workflows/release.yml 等价，但用 Gitea REST API 代替 gh CLI。
+# 两种触发：
+#   1. 推 tag：git tag v0.2.1 && git push origin v0.2.1（tag 必须等于 v<Cargo.toml 版本>）
+#   2. Actions → Run workflow（tag 留空则用 v<Cargo.toml 版本>）
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:

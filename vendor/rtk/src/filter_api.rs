@@ -102,7 +102,13 @@ fn looks_like_ls_long(input: &str) -> bool {
     let mut permission_lines = 0usize;
     for line in input.lines() {
         let line = line.trim_start();
-        if line.is_empty() || line.starts_with("total ") || line.starts_with("总计") {
+        // "total 20" (en) / "总用量 20" (zh_CN) / "总计 20" are headers, not entries:
+        // counting one as an unparseable entry would veto the whole detection.
+        if line.is_empty()
+            || line.starts_with("total ")
+            || line.starts_with("总用量")
+            || line.starts_with("总计")
+        {
             continue;
         }
         let perms = starts_with_permissions(line);
