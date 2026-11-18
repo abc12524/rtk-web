@@ -8,50 +8,6 @@ use serde::Serialize;
 
 static LOSSLESS_CHAIN: [&dyn Method; 2] = [&ANSI, &DEDUP];
 
-/// Recognize command-specific output shapes in `auto` mode.
-///
-/// shell-tool and similar clients only send `mode=auto` and have no way to
-/// know which command produced the text, so they never pass `filter=ls`.
-/// The generic term chain (ansi/progress/dedup/cap) leaves a short `ls -l`
-/// listing untouched; the `ls` filter is the only thing that compacts it.
-/// Auto mode therefore sniffs the strongest signature — a permissions field
-/// at the start of each non-header line — and routes the block through the
-/// matching filter. `rtk::filter_api::apply` is panic-safe and never_worse,
-/// so a false positive can only leave the text unchanged.
-fn detect_command_filter(input: &str) -> Option<&'static str> {
-    let mut nonblank = 0usize;
-    let mut perm_lines = 0usize;
-    for line in input.lines() {
-        let line = line.trim_start();
-        if line.is_empty() || line.starts_with("total ") || line.starts_with("总计") {
-            continue;
-        }
-        nonblank += 1;
-        let bytes = line.as_bytes();
-        let perms_ok = bytes.len() >= 11
-            && matches!(bytes[0], b'-' | b'd' | b'l' | b'c' | b'b' | b'p' | b's')
-            && bytes[1..10]
-                .iter()
-                .all(|c| matches!(c, b'r' | b'w' | b'x' | b's' | b'S' | b't' | b'T' | b'-'));
-        if perms_ok {
-            // GNU ls may append an ACL/SELinux marker (`+`, `.`, `@`) before
-            // the column separator; accept an optional marker then whitespace.
-            let rest = &bytes[10..];
-            let separated = rest.first().is_some_and(|c| c.is_ascii_whitespace())
-                || (matches!(rest.first(), Some(b'+' | b'.' | b'@'))
-                    && rest.get(1).is_some_and(|c| c.is_ascii_whitespace()));
-            if separated {
-                perm_lines += 1;
-            }
-        }
-    }
-    if nonblank > 0 && perm_lines == nonblank {
-        Some("ls")
-    } else {
-        None
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Chain,
@@ -139,17 +95,17 @@ pub fn compress(input: &str, options: CompressOptions) -> CompressOutput {
     }
 
     if options.mode == Mode::Auto {
-        if let Some(name) = detect_command_filter(input) {
-            if let Some(text) = rtk::filter_api::apply(name, input) {
-                if text.len() < input.len() {
-                    return CompressOutput {
-                        text,
-                        chain: vec![format!("auto>filter:{name}")],
-                        lossy: true,
-                        changed: true,
-                    };
-                }
-            }
+        // Sniff the command behind the output (ls -l, grep, find, git, cargo,
+        // pytest, …) and apply its filter. Clients like shell-tool only send
+        // `mode=auto`, so without this a bare `ls -l` would fall through the
+        // generic term chain unchanged.
+        if let Some((name, text)) = rtk::filter_api::auto(input) {
+            return CompressOutput {
+                text,
+                chain: vec![format!("auto>filter:{name}")],
+                lossy: true,
+                changed: true,
+            };
         }
         if let Some(rendered) = strategy::render(input, 0, estimate_tokens) {
             if rendered.body.len() < input.len() {
@@ -315,22 +271,74 @@ mod tests {
     }
 
     #[test]
-    fn detect_rejects_plain_text_and_partial_match() {
-        assert_eq!(detect_command_filter("hello\nworld\n"), None);
-        assert_eq!(detect_command_filter(""), None);
-        // One permission-looking line among plain text is not enough.
-        let mixed = "just some output\n-rwxr-xr-x  1 me me 10 Jan 1 12:00 run.sh\nother text\n";
-        assert_eq!(detect_command_filter(mixed), None);
-        assert_eq!(detect_command_filter(LS_RAW), Some("ls"));
+    fn auto_detects_ls_variants() {
+        // -la (dot entries), -lh (human sizes), ACL marker, Chinese locale and
+        // ls -R (directory headers) must all be recognised, then compacted.
+        let cases = [
+            "total 12\ndrwxr-xr-x 5 root root 4096 Nov  7 10:00 .\n-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go\n",
+            "total 8\n-rw-r--r-- 1 root root 1.2K Nov  7 09:00 big.log\n-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go\n",
+            "total 4\n-rw-r--r--+ 1 root root 10 Nov  7 10:00 x.txt\n",
+            "总计 12\ndrwxr-xr-x 2 root root 4096 6月28日 17:28 AI\n-rw-r--r-- 1 root root 541 10月18日 23:00 a.py\n",
+            r#".:
+total 16
+-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go
+-rw-r--r-- 1 root root 120 Nov  7 09:00 b.go
+drwxr-xr-x 2 root root 4096 Nov  7 10:00 sub
+
+./sub:
+total 8
+-rw-r--r-- 1 root root 900 Nov  7 09:00 c.go
+-rw-r--r-- 1 root root 800 Nov  7 09:00 d.go
+"#,
+        ];
+        for raw in cases {
+            assert_eq!(
+                rtk::filter_api::auto(raw).map(|(n, _)| n),
+                Some("ls"),
+                "not detected as ls: {raw:?}"
+            );
+        }
     }
 
     #[test]
-    fn detect_accepts_acl_marker_and_chinese_locale() {
-        let acl = "total 4\n-rw-r--r--+ 1 root root 10 Nov  7 10:00 a.txt\n\
-                   drwxr-xr-x. 2 root root 4096 Nov  7 10:00 dir\n";
-        assert_eq!(detect_command_filter(acl), Some("ls"));
-        let zh = "总计 162880\ndrwxrwxr-x  2 root root 4096 6月28日 17:28 AI\n\
-                  -rw-r--r--  1 root root  541 10月18日 23:00 adv_scan.py\n";
-        assert_eq!(detect_command_filter(zh), Some("ls"));
+    fn auto_ignores_plain_text_and_partial_permission_lines() {
+        assert!(rtk::filter_api::auto("hello\nworld\n").is_none());
+        assert!(rtk::filter_api::auto("").is_none());
+        // One permission-looking line among plain text is not enough.
+        let mixed = "just some output\n-rwxr-xr-x  1 me me 10 Jan 1 12:00 run.sh\nother text\n";
+        assert!(rtk::filter_api::auto(mixed).is_none());
     }
+
+    #[test]
+    fn auto_ls_preserves_human_readable_sizes() {
+        // `ls -lh` sizes must survive: "1.2K" used to collapse to "1B" because
+        // the parser fell back to the numeric nlink column.
+        let raw = "total 8\n\
+                   -rw-r--r-- 1 root root 1.2K Nov  7 09:00 big.log\n\
+                   -rw-r--r-- 1 root root  341 Nov  7 09:00 a.go\n";
+        let out = compress(raw, term(false, Mode::Auto));
+        assert!(out.text.contains("1.2K"), "{}", out.text);
+        assert!(out.text.contains("341B"), "{}", out.text);
+    }
+
+    #[test]
+    fn auto_detects_grep_and_find() {
+        let mut grep = String::new();
+        for i in 0..20 {
+            grep.push_str(&format!(
+                "src/components/deep/nested/file_with_long_name.rs:{}:    let value_{} = compute({});\n",
+                10 + i,
+                i,
+                i
+            ));
+        }
+        assert_eq!(rtk::filter_api::auto(&grep).map(|(n, _)| n), Some("grep"));
+
+        let mut find = String::new();
+        for i in 0..30 {
+            find.push_str(&format!("./very/long/common/prefix/dir/file_{i:02}.rs\n"));
+        }
+        assert_eq!(rtk::filter_api::auto(&find).map(|(n, _)| n), Some("find"));
+    }
+
 }

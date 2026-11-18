@@ -24,6 +24,83 @@ pub fn apply(name: &str, input: &str) -> Option<String> {
     Some(never_worse(input, &output).to_string())
 }
 
+/// Pick and run a filter for `input` without being told the command name.
+///
+/// This is the entry point behind `mode=auto`: clients such as shell-tool send
+/// raw command output with no `filter` parameter, so the service sniffs the
+/// shape instead. Recognises `ls -l` variants first (the `pipe` detector does
+/// not cover them), then defers to the pipe auto-detector for grep / find /
+/// git / cargo / pytest and friends.
+///
+/// Returns `None` when nothing matches or the chosen filter does not produce
+/// strictly fewer bytes — a false positive can then only leave the text as-is.
+pub fn auto(input: &str) -> Option<(&'static str, String)> {
+    if looks_like_ls_long(input) {
+        if let Some(out) = apply("ls", input) {
+            if out.len() < input.len() {
+                return Some(("ls", out));
+            }
+        }
+    }
+
+    let (name, filter) = crate::cmds::system::pipe_cmd::auto_detect_filter_named(input);
+    if name.is_empty() {
+        return None;
+    }
+    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter(input)))
+        .unwrap_or_else(|_| input.to_string());
+    let output = never_worse(input, &output).to_string();
+    if output.len() < input.len() {
+        Some((name, output))
+    } else {
+        None
+    }
+}
+
+/// True when every entry line starts with a `ls -l` permissions field.
+///
+/// Skips the `total`/`总计` header and `ls -R` directory headers, and tolerates
+/// the GNU ACL/SELinux marker (`+`, `.`, `@`) after the nine mode bits. Needs at
+/// least one entry, so empty or header-only input never matches.
+fn looks_like_ls_long(input: &str) -> bool {
+    let mut entries = 0usize;
+    let mut permission_lines = 0usize;
+    for line in input.lines() {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with("total ") || line.starts_with("总计") {
+            continue;
+        }
+        let perms = starts_with_permissions(line);
+        // `ls -R` prints "<dir>:" headers; ignore them without inflating the
+        // entry count, so a recursive long listing still matches.
+        if !perms && line.ends_with(':') {
+            continue;
+        }
+        entries += 1;
+        if perms {
+            permission_lines += 1;
+        }
+    }
+    entries > 0 && permission_lines == entries
+}
+
+fn starts_with_permissions(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    if bytes.len() < 11 || !matches!(bytes[0], b'-' | b'd' | b'l' | b'c' | b'b' | b'p' | b's') {
+        return false;
+    }
+    if !bytes[1..10]
+        .iter()
+        .all(|c| matches!(c, b'r' | b'w' | b'x' | b's' | b'S' | b't' | b'T' | b'-'))
+    {
+        return false;
+    }
+    let rest = &bytes[10..];
+    rest.first().is_some_and(|c| c.is_ascii_whitespace())
+        || (matches!(rest.first(), Some(b'+' | b'.' | b'@'))
+            && rest.get(1).is_some_and(|c| c.is_ascii_whitespace()))
+}
+
 fn git_log(input: &str) -> String {
     crate::cmds::git::git_cmd::filter_log_output(input, 50, false)
 }
@@ -119,6 +196,7 @@ const NAMES: &[&str] = &[
     "deno",
     "ecs",
     "eslint",
+    "find",
     "gh-pr-checks",
     "git-branch",
     "git-diff",
@@ -129,6 +207,7 @@ const NAMES: &[&str] = &[
     "go-build",
     "go-test",
     "go-vet",
+    "grep",
     "gradle-connected",
     "gradle-dependencies",
     "gradle-lint",
@@ -179,6 +258,7 @@ const NAMES: &[&str] = &[
     "sqlfluff-lint",
     "tree",
     "tsc",
+    "vitest",
     "wc",
 ];
 
@@ -188,15 +268,18 @@ fn lookup(name: &str) -> Option<FilterFn> {
         "ctest" => crate::cmds::system::ctest_cmd::filter_ctest_output,
         "deno" => crate::cmds::js::deno_cmd::filter_deno_output,
         "ecs" => crate::cmds::php::ecs_cmd::filter_ecs_output,
+        "find" | "fd" => crate::cmds::system::pipe_cmd::find_wrapper,
         "git-diff" => git_diff,
         "git-log" => git_log,
         "git-status" => crate::cmds::git::git_cmd::format_status_output,
         "go-build" => crate::cmds::go::go_cmd::filter_go_build,
         "go-test" => crate::cmds::go::go_cmd::filter_go_test_pipe,
+        "grep" | "rg" => crate::cmds::system::pipe_cmd::grep_wrapper,
         "log" => crate::cmds::system::log_cmd::run_stdin_str,
         "ls" => ls_long,
         "ls-short" => ls_short,
         "mypy" => crate::cmds::python::mypy_cmd::filter_mypy_output,
+        "vitest" => crate::cmds::system::pipe_cmd::vitest_wrapper,
         "paratest" | "pest" | "php-test" => crate::cmds::php::test_output::filter_test_runner_output,
         "phpunit" => crate::cmds::php::phpunit_cmd::filter_phpunit_output,
         "phpstan" => phpstan,
@@ -302,4 +385,55 @@ mod tests {
         let out = apply("mypy", input).expect("mypy is registered");
         assert!(out.len() <= input.len(), "{out}");
     }
+
+    #[test]
+    fn auto_picks_ls_for_long_listings() {
+        let cases = [
+            "total 12\ndrwxr-xr-x 5 root root 4096 Nov  7 10:00 .\n-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go\n",
+            "total 8\n-rw-r--r-- 1 root root 1.2K Nov  7 09:00 big.log\n-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go\n",
+            "total 4\n-rw-r--r--+ 1 root root 10 Nov  7 10:00 x.txt\n",
+            "总计 12\ndrwxr-xr-x 2 root root 4096 6月28日 17:28 AI\n-rw-r--r-- 1 root root 541 10月18日 23:00 a.py\n",
+            r#".:
+total 16
+-rw-r--r-- 1 root root 341 Nov  7 09:00 a.go
+-rw-r--r-- 1 root root 120 Nov  7 09:00 b.go
+drwxr-xr-x 2 root root 4096 Nov  7 10:00 sub
+
+./sub:
+total 8
+-rw-r--r-- 1 root root 900 Nov  7 09:00 c.go
+-rw-r--r-- 1 root root 800 Nov  7 09:00 d.go
+"#,
+        ];
+        for raw in cases {
+            assert_eq!(auto(raw).map(|(n, _)| n), Some("ls"), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn auto_covers_grep_and_find() {
+        let mut grep = String::new();
+        for i in 0..20 {
+            grep.push_str(&format!(
+                "src/components/deep/nested/file_with_long_name.rs:{}:    let value_{} = compute({});\n",
+                10 + i,
+                i,
+                i
+            ));
+        }
+        assert_eq!(auto(&grep).map(|(n, _)| n), Some("grep"));
+
+        let mut find = String::new();
+        for i in 0..30 {
+            find.push_str(&format!("./very/long/common/prefix/dir/file_{i:02}.rs\n"));
+        }
+        assert_eq!(auto(&find).map(|(n, _)| n), Some("find"));
+    }
+
+    #[test]
+    fn auto_returns_none_for_plain_text() {
+        assert!(auto("hello\nworld\n").is_none());
+        assert!(auto("").is_none());
+    }
+
 }

@@ -22,7 +22,7 @@ rtk = { path = "vendor/rtk" }
 rtk-engine = { path = "vendor/rtk/engine" }
 ```
 
-升级 rtk 时，用上游源码覆盖 `vendor/rtk`，再重新应用本仓库对 `src/filter_api.rs`、`src/cmds/system/ls.rs` 等文件的改动。
+升级 rtk 时，用上游源码覆盖 `vendor/rtk`，再重新应用本仓库对 `src/filter_api.rs`、`src/cmds/system/ls.rs`、`src/cmds/system/pipe_cmd.rs` 等文件的改动。
 
 > `rtk-engine` 的许可证是 **BUSL-1.1**，`vendor/rtk/LICENSE` 是 Apache-2.0。内部自用生产免费；对外提供托管服务需要先获得 rtk-ai 授权。
 
@@ -209,7 +209,7 @@ curl -X POST "http://127.0.0.1:8787/api/compress/file?format=term&lossless=true"
 ## 压缩语义
 
 - `chain` 模式：按格式选择引擎内置链。`term` 链为 `ansi → progress → dedup → base64-elide → cap`。
-- `auto` 模式：形状感知 + 命令输出自动识别。命中已知命令输出（目前为 `ls -l` 权限行）时自动套用专属过滤器（`X-Rtk-Chain: auto>filter:ls`），否则退化为形状感知策略。压缩率更高，但会明显丢内容，仅建议显式开启。
+- `auto` 模式：形状感知 + 命令输出自动识别。命中已知命令输出（`ls -l` 各变体、`grep`/`find`、`cargo test`、`pytest`、`ctest`、`go test`、`phpunit`、`mypy`、`vitest` 等）时自动套用专属过滤器（`X-Rtk-Chain: auto>filter:<name>`），否则退化为形状感知策略。压缩率更高，但会明显丢内容，仅建议显式开启。
 - `lossless=true`：只运行 `ansi` 与 `dedup`。`dedup` 会把连续重复行折叠为 `[xN]`，属于语义无损。
 - 引擎的 `never_worse` 保护保证输出不会比输入更大；方法 panic 时回退原文。
 

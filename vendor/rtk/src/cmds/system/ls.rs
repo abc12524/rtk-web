@@ -459,18 +459,52 @@ fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
     let perms = before_parts[0].to_string();
     let file_type = perms.chars().next()?;
 
-    // Size is the rightmost parseable number before the date.
+    // Size is the rightmost parseable size before the date.
     // nlinks is also numeric but appears earlier; scanning from the end
-    // guarantees we hit the size field first.
+    // guarantees we hit the size field first. `ls -h` emits human-readable
+    // sizes ("1.2K", "3M"), which a plain `u64` parse would reject and then
+    // mistake the nlink column for the size.
     let mut size: u64 = 0;
     for part in before_parts.iter().rev() {
-        if let Ok(s) = part.parse::<u64>() {
+        if let Some(s) = parse_size_field(part) {
             size = s;
             break;
         }
     }
 
     Some((file_type, perms, size, name))
+}
+
+/// Parse a size column from `ls -l`, accepting plain byte counts and the
+/// human-readable forms `ls -h` / `--si` produce (`1.2K`, `12K`, `3.4M`, `0`).
+/// Suffixes are read as 1024-based; a trailing `B`/`iB` is tolerated.
+fn parse_size_field(text: &str) -> Option<u64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(bytes) = text.parse::<u64>() {
+        return Some(bytes);
+    }
+    let split = text
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_alphabetic())?;
+    let (number, suffix) = text.split_at(split.0);
+    let value: f64 = number.parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let shift = match suffix.chars().next()?.to_ascii_uppercase() {
+        'B' => 0,
+        'K' => 1,
+        'M' => 2,
+        'G' => 3,
+        'T' => 4,
+        'P' => 5,
+        'E' => 6,
+        _ => return None,
+    };
+    Some((value * 1024f64.powi(shift)).round() as u64)
 }
 
 /// Returns true if the line represents a . or .. directory entry.

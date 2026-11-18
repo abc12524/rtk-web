@@ -140,7 +140,7 @@ curl -X POST "http://192.168.30.181:8787/api/compress/file?filter=ls" \
 
 传 `filter=<name>` 时，服务调用 rtk `src/cmds` 中的专用解析器，而不是通用链。它理解命令输出结构，会重排、缩写、删冗余，压缩率明显更高。
 
-> `mode=auto` 时无需显式传 `filter`：服务会嗅探输入形状，命中已知命令输出（目前识别 `ls -l` 权限行）就自动套用对应过滤器，响应头 `X-Rtk-Chain` 显示为 `auto>filter:ls`。未命中时退回形状感知策略。识别是"宁可不认"的保守判断，误判时过滤器本身只会原样返回，不会破坏内容。
+> `mode=auto` 时无需显式传 `filter`：服务会嗅探输入形状，命中已知命令输出就自动套用对应过滤器，响应头 `X-Rtk-Chain` 显示为 `auto>filter:<name>`。目前覆盖 `ls -l` 各变体（`-la`、`-lh`、ACL 标记、`-R`、中英文 locale）以及 `grep`/`rg`、`find`/`fd`、`cargo test`、`pytest`、`ctest`、`go test`、`phpunit`、`mypy`、`vitest` 等。未命中时退回形状感知策略；只有当过滤器确实让输出更短时才会替换，误判不会破坏内容。
 
 ```bash
 # ls -l（支持中英文 locale）

@@ -74,7 +74,7 @@ fn pint_wrapper(input: &str) -> String {
     }
 }
 
-fn vitest_wrapper(input: &str) -> String {
+pub fn vitest_wrapper(input: &str) -> String {
     use crate::cmds::js::vitest_cmd::VitestParser;
     use crate::parser::{FormatMode, OutputParser, TokenFormatter};
     let result = VitestParser::parse(input);
@@ -85,7 +85,7 @@ fn vitest_wrapper(input: &str) -> String {
     }
 }
 
-fn grep_wrapper(input: &str) -> String {
+pub fn grep_wrapper(input: &str) -> String {
     use std::collections::HashMap;
 
     let mut by_file: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
@@ -126,7 +126,7 @@ fn grep_wrapper(input: &str) -> String {
     out
 }
 
-fn find_wrapper(input: &str) -> String {
+pub fn find_wrapper(input: &str) -> String {
     use std::collections::HashMap;
 
     let paths: Vec<&str> = input.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -171,21 +171,31 @@ fn find_wrapper(input: &str) -> String {
 }
 
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
+    auto_detect_filter_named(input).1
+}
+
+/// Like [`auto_detect_filter`] but also reports which filter was chosen, so
+/// callers (e.g. the `auto` mode of rtk-web) can label the result. Returns an
+/// empty name plus [`identity_filter`] when nothing matches.
+pub fn auto_detect_filter_named(input: &str) -> (&'static str, fn(&str) -> String) {
     let end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
     let end = input.floor_char_boundary(end);
     let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
-        return crate::cmds::rust::cargo_cmd::filter_cargo_test;
+        return ("cargo-test", crate::cmds::rust::cargo_cmd::filter_cargo_test);
     }
 
     if first_1k.contains("=== test session starts") {
-        return crate::cmds::python::pytest_cmd::filter_pytest_output;
+        return (
+            "pytest",
+            crate::cmds::python::pytest_cmd::filter_pytest_output,
+        );
     }
 
     if crate::cmds::system::ctest_cmd::looks_like_ctest_output(first_1k) {
-        return crate::cmds::system::ctest_cmd::filter_ctest_output;
+        return ("ctest", crate::cmds::system::ctest_cmd::filter_ctest_output);
     }
 
     let first_trimmed = first_1k.trim_start();
@@ -194,17 +204,20 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     // Anchor to the leading "PHPUnit " token so a LICENSE/composer/`git log`
     // that merely mentions the author isn't misrouted here.
     if first_trimmed.starts_with("PHPUnit ") && first_1k.contains("by Sebastian Bergmann") {
-        return crate::cmds::php::phpunit_cmd::filter_phpunit_output;
+        return (
+            "phpunit",
+            crate::cmds::php::phpunit_cmd::filter_phpunit_output,
+        );
     }
 
     if crate::cmds::go::go_cmd::is_go_test_json(input)
         || (first_trimmed.starts_with('{') && first_1k.contains("\"Action\""))
     {
-        return go_test_wrapper;
+        return ("go-test", go_test_wrapper);
     }
 
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
-        return crate::cmds::python::mypy_cmd::filter_mypy_output;
+        return ("mypy", crate::cmds::python::mypy_cmd::filter_mypy_output);
     }
 
     // grep/rg: lines matching file:number:content
@@ -217,11 +230,11 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
             parts.len() == 3 && parts[1].parse::<usize>().is_ok()
         })
     {
-        return grep_wrapper;
+        return ("grep", grep_wrapper);
     }
 
     if first_1k.contains("\"testResults\"") || first_1k.contains("\"numTotalTests\"") {
-        return vitest_wrapper;
+        return ("vitest", vitest_wrapper);
     }
 
     // find/fd: all non-empty lines look like file paths, minimum 3 lines
@@ -236,10 +249,10 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         .count();
     let nonempty_lines: usize = first_1k.lines().filter(|l| !l.trim().is_empty()).count();
     if nonempty_lines >= 3 && path_like_lines == nonempty_lines {
-        return find_wrapper;
+        return ("find", find_wrapper);
     }
 
-    identity_filter
+    ("", identity_filter)
 }
 
 fn identity_filter(input: &str) -> String {
