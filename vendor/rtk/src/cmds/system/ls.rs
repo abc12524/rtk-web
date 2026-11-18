@@ -7,7 +7,6 @@ use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::tracking::estimate_tokens;
-use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 use regex::Regex;
@@ -566,7 +565,8 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, parsed_count, truncated, filtered) so caller can emit
 /// a recovery hint when anything was dropped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
-/// truncated holds compact lines beyond the CAP_INVENTORY display cap.
+/// truncated is always empty now (no display cap on listings); kept in the
+/// return type so the caller can still emit a hint for filtered entries.
 /// filtered holds the display name of each entry RTK removed from view
 /// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
 /// lines).
@@ -666,12 +666,12 @@ fn compact_ls(
     // Keep unparsed lines verbatim, after the compacted entries.
     all_lines.extend(unparsed);
 
-    // Cap the displayed listing; the rest is recoverable via the tee hint.
-    let truncated = if all_lines.len() > CAP_INVENTORY {
-        all_lines.split_off(CAP_INVENTORY)
-    } else {
-        Vec::new()
-    };
+    // No display cap: a directory listing IS the answer to the command, not a
+    // sample of it. Size is controlled by the compact layout (dirs first,
+    // octal perms, shorthand sizes), never by dropping entries — the tee hint
+    // that used to make them "recoverable" is inactive in rtk-web, so
+    // truncating here silently lost real files.
+    let truncated: Vec<String> = Vec::new();
 
     let mut entries = String::new();
     for line in &all_lines {
@@ -1052,7 +1052,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_truncates_past_cap() {
+    fn test_compact_keeps_every_entry() {
+        // No display cap: an `ls` listing is the answer, so 60 files means 60
+        // lines — nothing is moved into `truncated` for the tee hint to hide.
         let mut input = String::from("total 0\n");
         for i in 0..60 {
             input.push_str(&format!(
@@ -1061,13 +1063,12 @@ mod tests {
             ));
         }
         let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false);
-        assert_eq!(entries.lines().count(), CAP_INVENTORY);
-        assert_eq!(truncated.len(), 60 - CAP_INVENTORY);
+        assert_eq!(entries.lines().count(), 60);
+        assert!(truncated.is_empty(), "nothing truncated: {truncated:?}");
         assert!(entries.contains("file00.txt"));
-        assert!(!entries.contains("file59.txt"));
         assert!(
-            truncated.iter().any(|l| l.contains("file59.txt")),
-            "overflow entries must be recoverable via the tee file"
+            entries.contains("file59.txt"),
+            "last entry must survive: {entries:?}"
         );
     }
 
@@ -1414,7 +1415,7 @@ mod tests {
 
     #[test]
     fn test_render_bare_ls_keeps_compact_when_it_saves() {
-        let files: Vec<String> = (0..CAP_INVENTORY + 40)
+        let files: Vec<String> = (0..60)
             .map(|i| format!("file_with_a_long_name_{i:03}.txt"))
             .collect();
         let mut raw: String = files.iter().map(|name| long_line('-', name)).collect();
@@ -1424,7 +1425,8 @@ mod tests {
         let native = one_per_line(&names);
         let out = render(&raw, Some(&native), false, false, 0);
         assert!(out.starts_with("file_with_a_long_name_000.txt\n"), "{out}");
-        assert!(out.contains("... (40 more, 1 filtered)"), "{out}");
+        assert!(out.contains("file_with_a_long_name_059.txt"), "{out}");
+        assert!(out.contains("... (1 filtered)"), "{out}");
         assert!(estimate_tokens(&out) < estimate_tokens(&native));
     }
 
