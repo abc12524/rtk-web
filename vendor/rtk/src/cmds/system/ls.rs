@@ -582,6 +582,11 @@ fn compact_ls(
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
     let mut filtered: Vec<String> = Vec::new();
+    // Lines the parser could not recognise. These are NOT noise — they are
+    // entries we failed to understand (unexpected time style, odd locale,
+    // weird permission column…), so dropping them loses real content. Keep
+    // them verbatim and append after the compacted entries.
+    let mut unparsed: Vec<String> = Vec::new();
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -593,7 +598,7 @@ fn compact_ls(
             if is_dotdir(line) {
                 dotdirs += 1;
             } else {
-                filtered.push(line.trim().to_string());
+                unparsed.push(line.trim_end().to_string());
             }
             continue;
         };
@@ -633,11 +638,18 @@ fn compact_ls(
         }
         // Everything parsed was filtered out (e.g., only noise dirs) —
         // keep filtered so the caller can still emit a recovery hint.
+        // Unparsed lines are real content though: hand them back verbatim
+        // instead of collapsing the whole listing to "(empty)".
+        if !unparsed.is_empty() {
+            let mut out = unparsed.join("\n");
+            out.push('\n');
+            return (out, parsed_count, Vec::new(), filtered);
+        }
         return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
     }
 
     // Dirs first, then files — one compact line each
-    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
+    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len() + unparsed.len());
     for (name, octal) in &dirs {
         all_lines.push(match octal {
             Some(octal) => format!("{}  {}/", octal, name),
@@ -651,6 +663,8 @@ fn compact_ls(
             (true, None) => format!("{}  {}", name, size),
         });
     }
+    // Keep unparsed lines verbatim, after the compacted entries.
+    all_lines.extend(unparsed);
 
     // Cap the displayed listing; the rest is recoverable via the tee hint.
     let truncated = if all_lines.len() > CAP_INVENTORY {
@@ -729,15 +743,34 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_hidden_unparsable_line() {
-        // A non-dotdir line the date regex can't parse is silently dropped —
-        // it must be collected as hidden so the caller emits a recovery hint.
+    fn test_unparsable_line_is_kept_verbatim() {
+        // A non-dotdir line the date regex can't parse is real content we
+        // simply failed to understand — it must stay in the output, not be
+        // swallowed into a "N filtered" counter.
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n\
                      garbage line without date anchor\n";
         let (entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
         assert!(entries.contains("main.rs"));
-        assert_eq!(hidden, vec!["garbage line without date anchor"]);
+        assert!(
+            entries.contains("garbage line without date anchor"),
+            "unparsed line must survive in the output: {entries:?}"
+        );
+        assert!(
+            hidden.is_empty(),
+            "unparsed lines are not noise, nothing hidden: {hidden:?}"
+        );
+    }
+
+    #[test]
+    fn test_only_unparsable_lines_are_returned() {
+        let input = "total 8\n\
+                     weird one\n\
+                     weird two\n";
+        let (entries, _parsed, _truncated, hidden) = compact_ls(input, true, true);
+        assert!(entries.contains("weird one"), "{entries:?}");
+        assert!(entries.contains("weird two"), "{entries:?}");
+        assert!(hidden.is_empty(), "{hidden:?}");
     }
 
     #[test]

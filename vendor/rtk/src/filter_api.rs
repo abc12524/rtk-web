@@ -145,11 +145,16 @@ fn git_diff(input: &str) -> String {
 }
 
 fn ls_long(input: &str) -> String {
-    crate::cmds::system::ls::render(input, None, false, true, 0)
+    // Filter entry point: we only get the output text, never the command line,
+    // so there is no way to know whether the user passed -a / -A. Assuming
+    // "no -a" and filtering NOISE_DIRS would silently hide entries the user
+    // explicitly asked for (a `ls -la` that loses its last line). Keep every
+    // entry visible; the compaction is limited to layout and size shorthand.
+    crate::cmds::system::ls::render(input, None, true, true, 0)
 }
 
 fn ls_short(input: &str) -> String {
-    crate::cmds::system::ls::render(input, None, false, false, 0)
+    crate::cmds::system::ls::render(input, None, true, false, 0)
 }
 
 fn phpstan(input: &str) -> String {
