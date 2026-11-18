@@ -1,0 +1,153 @@
+name: Release (Gitea)
+
+# 在 Gitea Actions（act_runner / gitea-runner，host 模式）下构建并发布 Release。
+# 与 .github/workflows/release.yml 等价，但用 Gitea REST API 代替 gh CLI。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布 tag（留空则使用 v<Cargo.toml 版本>）"
+        required: false
+        default: ""
+      prerelease:
+        description: "标记为 pre-release（true/false）"
+        required: false
+        default: "false"
+      draft:
+        description: "创建为草稿（true/false）"
+        required: false
+        default: "false"
+
+concurrency:
+  group: release-gitea-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::Cargo.toml 中找不到 package version"
+            exit 1
+          fi
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag="v$version"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) tag="v$tag" ;;
+          esac
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag 与 Cargo.toml 版本 $version 不一致，请先升级版本号再发布"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=rtk-web-$version-linux-x86_64" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$NAME"
+          install -m 755 target/release/rtk-web "dist/$NAME/rtk-web"
+          install -m 644 README.md "dist/$NAME/README.md"
+          install -m 755 scripts/rtk_client.py "dist/$NAME/rtk_client.py"
+          install -m 644 deploy/rtk-web.service "dist/$NAME/rtk-web.service"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > SHA256SUMS)
+          cat > dist/RELEASE_NOTES.md <<EOF
+          ## rtk-web $VERSION
+
+          Linux x86_64 发布包，构建环境 glibc >= 2.39。
+
+          ### 安装
+
+          \`\`\`bash
+          tar -xzf $NAME.tar.gz
+          cd $NAME
+          sudo install -m 755 rtk-web /opt/rtk-web/rtk-web
+          sudo systemctl restart rtk-web
+          \`\`\`
+
+          ### 校验
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          \`\`\`
+          EOF
+
+      - name: Publish Gitea Release
+        shell: bash
+        env:
+          TOKEN: ${{ github.token }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          NAME: ${{ steps.meta.outputs.name }}
+          SHA: ${{ github.sha }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          api="$SERVER/api/v1/repos/$REPO"
+
+          # 已存在同名 release 就复用其 id，否则创建
+          rid="$(curl -sf -H "Authorization: token $TOKEN" "$api/releases/tags/$TAG" \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("id","") if isinstance(d,dict) else "")' \
+            || true)"
+          if [ -z "$rid" ]; then
+            python3 - <<'PY' > /tmp/release.json
+          import json, os
+          print(json.dumps({
+              "tag_name": os.environ["TAG"],
+              "name": "rtk-web " + os.environ["TAG"],
+              "body": open("dist/RELEASE_NOTES.md", encoding="utf-8").read(),
+              "target_commitish": os.environ["SHA"],
+              "draft": os.environ.get("DRAFT", "false") == "true",
+              "prerelease": os.environ.get("PRERELEASE", "false") == "true",
+          }, ensure_ascii=False))
+          PY
+            rid="$(curl -sf -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+              -X POST -d @/tmp/release.json "$api/releases" \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')"
+          else
+            echo "release $TAG 已存在（id=$rid），覆盖上传资产"
+          fi
+
+          for f in "dist/$NAME.tar.gz" "dist/SHA256SUMS"; do
+            curl -sf -H "Authorization: token $TOKEN" -X POST \
+              -F "attachment=@$f" "$api/releases/$rid/assets?name=$(basename "$f")" >/dev/null
+            echo "uploaded $(basename "$f")"
+          done
+
+          url="$(curl -sf -H "Authorization: token $TOKEN" "$api/releases/$rid" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("html_url",""))')"
+          {
+            echo "### Release"
+            echo
+            echo "已发布 \`$TAG\`：$url"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
