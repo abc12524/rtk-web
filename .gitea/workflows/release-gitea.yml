@@ -25,7 +25,7 @@ concurrency:
 jobs:
   release:
     name: Build and publish
-    runs-on: nuc5
+    runs-on: rust-builder
     timeout-minutes: 90
     env:
       PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -64,7 +64,7 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          export PATH="/root/.cargo/bin:$PATH"
+          export PATH="/root/.cargo/bin:/usr/local/bin:/usr/bin:$PATH"
           cargo --version
           cargo build --release --locked
 
