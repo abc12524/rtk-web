@@ -25,7 +25,7 @@ concurrency:
 jobs:
   release:
     name: Build and publish
-    runs-on: ubuntu-latest
+    runs-on: nuc5
     timeout-minutes: 90
     env:
       PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -63,7 +63,10 @@ jobs:
 
       - name: Build release binary
         shell: bash
-        run: cargo build --release --locked
+        run: |
+          export PATH="/root/.cargo/bin:$PATH"
+          cargo --version
+          cargo build --release --locked
 
       - name: Package
         shell: bash
