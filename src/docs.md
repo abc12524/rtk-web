@@ -141,6 +141,8 @@ curl -X POST "http://192.168.30.181:8787/api/compress/file?filter=ls" \
 传 `filter=<name>` 时，服务调用 rtk `src/cmds` 中的专用解析器，而不是通用链。它理解命令输出结构，会重排、缩写、删冗余，压缩率明显更高。
 
 > `mode=auto` 时无需显式传 `filter`：服务会嗅探输入形状，命中已知命令输出就自动套用对应过滤器，响应头 `X-Rtk-Chain` 显示为 `auto>filter:<name>`。目前覆盖 `ls -l` 各变体（`-la`、`-lh`、ACL 标记、`-R`、中英文 locale）以及 `grep`/`rg`、`find`/`fd`、`cargo test`、`pytest`、`ctest`、`go test`、`phpunit`、`mypy`、`vitest` 等。未命中时退回形状感知策略；只有当过滤器确实让输出更短时才会替换，误判不会破坏内容。
+>
+> 形状策略之后还有一层兜底：空白对齐的表格（`df`、`docker ps`、`kubectl get`、短 `systemctl` 列表）会被压掉列宽空格、折叠连续重复行，并保持列序与每个单元格内容不变，`X-Rtk-Chain` 记为 `auto>filter:table`。这一层排在形状策略**之后**是刻意的——200 行的 `ps aux` 由 `shape:prefix_rep` 能压掉约 88%，用表格压缩反而会差很多。
 
 ```bash
 # ls -l（支持中英文 locale）
@@ -163,7 +165,7 @@ curl http://192.168.30.181:8787/api/filters
 
 | 类别 | 名称 |
 | --- | --- |
-| 文件与目录 | `ls`、`ls-short`、`tree` |
+| 文件与目录 | `ls`、`ls-short`、`tree`、`table` |
 | Git | `git-status`、`git-log`、`git-diff`、`git-branch`、`git-stash-list`、`gh-pr-checks`、`glab-ci-status` |
 | Rust | `cargo-test`（别名 `cargo`）、`cargo-build`、`cargo-clippy`、`cargo-install`、`cargo-nextest` |
 | Go | `go-test`、`go-build`、`go-vet` |

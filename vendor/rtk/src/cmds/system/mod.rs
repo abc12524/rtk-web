@@ -13,5 +13,6 @@ pub mod pipe_cmd;
 pub mod read;
 pub mod search;
 pub mod summary;
+pub mod table;
 pub mod tree;
 pub mod wc_cmd;

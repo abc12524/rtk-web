@@ -117,6 +117,18 @@ pub fn compress(input: &str, options: CompressOptions) -> CompressOutput {
                 };
             }
         }
+        // Last resort, shape-only: whitespace-aligned tables (`df`, `docker ps`,
+        // `kubectl get`, short `systemctl` listings). Ordered after the strategy
+        // on purpose — a 200-line `ps aux` is already collapsed ~88% by
+        // `prefix_rep`, and squeezing its padding instead would be a big loss.
+        if let Some((name, text)) = rtk::filter_api::auto_fallback(input) {
+            return CompressOutput {
+                text,
+                chain: vec![format!("auto>filter:{name}")],
+                lossy: true,
+                changed: true,
+            };
+        }
     }
 
     let chain = chain_for(options.format);
@@ -341,4 +353,62 @@ total 8
         assert_eq!(rtk::filter_api::auto(&find).map(|(n, _)| n), Some("find"));
     }
 
+    const DF_RAW: &str = "Filesystem      Size  Used Avail Use% Mounted on\n\
+                          /dev/sda2       196G  120G   66G  65% /\n\
+                          /dev/sda1       511M  6.1M  505M   2% /boot/efi\n\
+                          tmpfs           3.9G     0  3.9G   0% /dev/shm\n";
+
+    #[test]
+    fn auto_fallback_squeezes_a_small_table() {
+        // A 14-line df falls under the shape strategy's thresholds, so nothing
+        // used to touch it. The table fallback is the last resort that does.
+        let out = compress(DF_RAW, term(false, Mode::Auto));
+        assert!(out.changed, "{:?}", out.chain);
+        assert_eq!(out.chain, vec!["auto>filter:table".to_string()]);
+        assert!(out.text.len() < DF_RAW.len());
+        assert!(
+            out.text.contains("/dev/sda2 196G 120G 66G 65% /"),
+            "{}",
+            out.text
+        );
+        // Column order and the two-word header cell survive verbatim.
+        assert!(out.text.contains("Use% Mounted on"), "{}", out.text);
+    }
+
+    #[test]
+    fn auto_fallback_is_not_consulted_for_large_tables() {
+        // A 200-row ps aux is collapsed ~88% by `shape:prefix_rep`; squeezing
+        // padding instead would be a big regression, so the table fallback must
+        // stay behind the strategy.
+        let mut raw = String::from("USER   PID %CPU %MEM COMMAND\n");
+        for i in 0..200 {
+            raw.push_str(&format!("root  {i:5}  0.0  0.1 /usr/lib/service-{i}/bin/run --flag\n"));
+        }
+        let out = compress(&raw, term(false, Mode::Auto));
+        assert!(out.changed);
+        assert!(
+            out.chain[0].starts_with("shape:"),
+            "table preempted the strategy: {:?}",
+            out.chain
+        );
+        assert!(out.text.len() < raw.len() / 2, "{} bytes", out.text.len());
+    }
+
+    #[test]
+    fn table_filter_is_individually_callable() {
+        let out = rtk::filter_api::apply("table", DF_RAW).expect("table is registered");
+        assert!(out.len() < DF_RAW.len());
+        assert_eq!(
+            rtk::filter_api::auto_fallback(DF_RAW).map(|(n, _)| n),
+            Some("table")
+        );
+    }
+
+    #[test]
+    fn auto_fallback_ignores_non_tables() {
+        assert!(rtk::filter_api::auto_fallback("hello\nworld\n").is_none());
+        assert!(rtk::filter_api::auto_fallback("").is_none());
+        // `ls -l` is the ls filter's job, not the table fallback's.
+        assert!(rtk::filter_api::auto_fallback(LS_RAW).is_none());
+    }
 }

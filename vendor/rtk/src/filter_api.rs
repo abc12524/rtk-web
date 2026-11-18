@@ -36,10 +36,8 @@ pub fn apply(name: &str, input: &str) -> Option<String> {
 /// strictly fewer bytes — a false positive can then only leave the text as-is.
 pub fn auto(input: &str) -> Option<(&'static str, String)> {
     if looks_like_ls_long(input) {
-        if let Some(out) = apply("ls", input) {
-            if out.len() < input.len() {
-                return Some(("ls", out));
-            }
+        if let Some(hit) = run_gated("ls", ls_long, input) {
+            return Some(hit);
         }
     }
 
@@ -47,6 +45,43 @@ pub fn auto(input: &str) -> Option<(&'static str, String)> {
     if name.is_empty() {
         return None;
     }
+    run_gated(name, filter, input)
+}
+
+/// Shape-only fallback for `mode=auto`, tried after the command filters *and*
+/// the shape strategy have both declined to shrink the input.
+///
+/// This exists because of where the two existing mechanisms leave a gap:
+///
+/// - the command filters in [`auto`] need a recognisable command signature;
+/// - the shape strategy needs volume — its `prefix_rep` / `unique` renderers
+///   collapse a 200-line `ps aux` by ~88%, but a 14-line `df` falls under its
+///   thresholds and is returned untouched.
+///
+/// Whitespace-aligned tables sit exactly in that gap: `df`, `docker ps`,
+/// `kubectl get`, short `systemctl` listings. Keeping this a separate entry
+/// point rather than a branch inside [`auto`] is deliberate — the detector here
+/// works on shape alone, so it must never preempt a strategy that is already
+/// compressing the same text far harder.
+///
+/// Returns `None` when the input is not a table or the squeeze does not make it
+/// strictly smaller.
+pub fn auto_fallback(input: &str) -> Option<(&'static str, String)> {
+    if !crate::cmds::system::table::looks_like_table(input) {
+        return None;
+    }
+    run_gated("table", crate::cmds::system::table::filter_table, input)
+}
+
+/// Run `filter` panic-safely and keep the result only when it is strictly
+/// smaller than the input. `never_worse` already rejects a filter that would
+/// grow the text; the length gate is what turns "no better" into "not handled",
+/// so the caller can move on to the next mechanism.
+fn run_gated(
+    name: &'static str,
+    filter: FilterFn,
+    input: &str,
+) -> Option<(&'static str, String)> {
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter(input)))
         .unwrap_or_else(|_| input.to_string());
     let output = never_worse(input, &output).to_string();
@@ -256,6 +291,7 @@ const NAMES: &[&str] = &[
     "sbt-run",
     "sbt-test",
     "sqlfluff-lint",
+    "table",
     "tree",
     "tsc",
     "vitest",
@@ -289,6 +325,7 @@ fn lookup(name: &str) -> Option<FilterFn> {
         "ruff-check" => crate::cmds::python::ruff_cmd::filter_ruff_check_json,
         "ruff-format" => crate::cmds::python::ruff_cmd::filter_ruff_format,
         "sqlfluff-lint" => crate::cmds::python::sqlfluff_cmd::filter_sqlfluff_lint_json,
+        "table" => crate::cmds::system::table::filter_table,
         "tree" => crate::cmds::system::tree::filter_tree_output,
         "tsc" => crate::cmds::js::tsc_cmd::filter_tsc_output,
         "black" => crate::cmds::system::format_cmd::filter_black_output,

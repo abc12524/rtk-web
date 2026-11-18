@@ -209,7 +209,7 @@ curl -X POST "http://127.0.0.1:8787/api/compress/file?format=term&lossless=true"
 ## 压缩语义
 
 - `chain` 模式：按格式选择引擎内置链。`term` 链为 `ansi → progress → dedup → base64-elide → cap`。
-- `auto` 模式：形状感知 + 命令输出自动识别。命中已知命令输出（`ls -l` 各变体、`grep`/`find`、`cargo test`、`pytest`、`ctest`、`go test`、`phpunit`、`mypy`、`vitest` 等）时自动套用专属过滤器（`X-Rtk-Chain: auto>filter:<name>`），否则退化为形状感知策略。压缩率更高，但会明显丢内容，仅建议显式开启。
+- `auto` 模式：形状感知 + 命令输出自动识别。命中已知命令输出（`ls -l` 各变体、`grep`/`find`、`cargo test`、`pytest`、`ctest`、`go test`、`phpunit`、`mypy`、`vitest` 等）时自动套用专属过滤器（`X-Rtk-Chain: auto>filter:<name>`），否则退化为形状感知策略；形状策略也压不动时，最后一个兜底是把空白对齐的表格（`df`、`docker ps`、`kubectl get`、短 `systemctl` 列表）的空格列宽压掉（同样记为 `auto>filter:table`）。压缩率更高，但会明显丢内容，仅建议显式开启。
 - `lossless=true`：只运行 `ansi` 与 `dedup`。`dedup` 会把连续重复行折叠为 `[xN]`，属于语义无损。
 - 引擎的 `never_worse` 保护保证输出不会比输入更大；方法 panic 时回退原文。
 
